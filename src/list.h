@@ -3,7 +3,7 @@
 #include "student.h"
 typedef struct Node 
 {
-    Student data;
+    Student data;//这是学生信息
     struct Node* next;
     struct Node* prev;
 };
