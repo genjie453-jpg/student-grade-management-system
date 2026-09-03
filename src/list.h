@@ -3,9 +3,9 @@
 #include "student.h"
 typedef struct Node 
 {
-    Student data;//这是学生信息
-    struct Node* next;
-    struct Node* prev;
-};
+    Student data;// 存储学生信息
+    struct Node* next;// 指向下一个节点的指针
+    struct Node* prev;// 指向上一个节点的指针
+} Node;
 
 #endif
