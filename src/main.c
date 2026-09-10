@@ -9,6 +9,7 @@
 #include "list.h"
 #include "fileio.h"
 #include "index.h"
+#include "auth.h"
 #include "webui.h"
 
 static Node* g_head = NULL;     /* 全部成绩记录（链表） */
@@ -302,33 +303,28 @@ static void student_menu(const char* id)
 
 static void console_mode(void)
 {
-    /* 登录：区分三种角色（课程设计演示用固定口令） */
-    printf("请选择角色登录: 1.管理员(admin) 2.教师(teacher) 3.学生\n> ");
-    char buf[8];
-    read_line(buf, sizeof(buf));
-    char pwd[32];
+    /* 登录：统一使用账号文件 data/users.txt 验证 */
+    char account[MAX_ACCOUNT], pwd[MAX_PWD];
+    Session sess;
 
-    if (buf[0] == '1') {
-        printf("管理员口令: "); read_line(pwd, sizeof(pwd));
-        if (strcmp(pwd, "admin") != 0) { printf("口令错误\n"); return; }
-        g_role = ROLE_ADMIN;
-        admin_menu();
-    } else if (buf[0] == '2') {
-        printf("教师口令: "); read_line(pwd, sizeof(pwd));
-        if (strcmp(pwd, "teacher") != 0) { printf("口令错误\n"); return; }
-        g_role = ROLE_TEACHER;
-        teacher_menu();
-    } else if (buf[0] == '3') {
-        char id[MAX_ID_LEN];
-        printf("学号: "); read_line(id, sizeof(id));
-        if (list_find_by_id(g_head, id) == NULL && index_lookup(id) == NULL) {
-            printf("[提示] 该学号暂无成绩记录，仍可进入\n");
-        }
-        g_role = ROLE_STUDENT;
-        student_menu(id);
-    } else {
-        printf("无效选择\n");
+    printf("登录（学生账号=学号，默认密码见 README）\n");
+    printf("账号: "); read_line(account, sizeof(account));
+    printf("密码: "); read_line(pwd, sizeof(pwd));
+
+    if (!auth_login(account, pwd, &sess)) {
+        printf("账号或密码错误\n");
+        return;
     }
+    g_role = sess.role;
+    printf("欢迎，%s（%s）\n", sess.name,
+           sess.role == ROLE_ADMIN ? "管理员" : sess.role == ROLE_TEACHER ? "教师" : "学生");
+
+    if (sess.role == ROLE_ADMIN)
+        admin_menu();
+    else if (sess.role == ROLE_TEACHER)
+        teacher_menu();
+    else
+        student_menu(sess.id);
 }
 
 /* ---------------- 入口 ---------------- */
@@ -339,7 +335,8 @@ int main(int argc, char* argv[])
 
     int loaded = 0;
     g_head = fileio_load(DATA_FILE, &loaded);
-    printf("已从 %s 加载 %d 条记录\n", DATA_FILE, loaded);
+    printf("已从 %s 加载 %d 条成绩记录\n", DATA_FILE, loaded);
+    printf("已从 %s 加载 %d 个账号\n", USER_FILE, auth_load(USER_FILE));
     index_build(g_head);            /* 建立学号哈希索引 */
 
     /* 带参数 "web" 直接进页面模式（双击运行则询问） */

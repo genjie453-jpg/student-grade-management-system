@@ -11,6 +11,7 @@
 #include "student.h"
 #include "list.h"
 #include "fileio.h"
+#include "auth.h"
 #include "webui.h"
 
 #pragma comment(lib, "ws2_32.lib")   /* MSVC 生效；gcc 用 -lws2_32 链接 */
@@ -251,6 +252,50 @@ static void api_save(Node* head)
             n >= 0 ? 0 : 1, n, DATA_FILE);
 }
 
+/* 强制覆盖/新增一个查询参数（用于学生强制只能查本人） */
+static void force_param(Param* ps, int* np, const char* key, const char* val)
+{
+    for (int i = 0; i < *np; i++) {
+        if (strcmp(ps[i].key, key) == 0) {
+            strncpy(ps[i].val, val, sizeof(ps[i].val) - 1);
+            ps[i].val[sizeof(ps[i].val) - 1] = '\0';
+            return;
+        }
+    }
+    if (*np < 16) {
+        strncpy(ps[*np].key, key, sizeof(ps[*np].key) - 1);
+        strncpy(ps[*np].val, val, sizeof(ps[*np].val) - 1);
+        ps[*np].key[sizeof(ps[*np].key) - 1] = '\0';
+        ps[*np].val[sizeof(ps[*np].val) - 1] = '\0';
+        (*np)++;
+    }
+}
+
+/* /api/login ：账号密码登录，成功签发令牌 */
+static void api_login(Param* ps, int np)
+{
+    Session s;
+    if (auth_login(get_param(ps, np, "account"), get_param(ps, np, "password"), &s)) {
+        char* w = s_body;
+        w += sprintf(w, "{\"code\":0,\"token\":");
+        json_str(&w, s.token);
+        w += sprintf(w, ",\"role\":%d,\"name\":", s.role);
+        json_str(&w, s.name);
+        w += sprintf(w, ",\"id\":");
+        json_str(&w, s.id);
+        sprintf(w, "}");
+    } else {
+        sprintf(s_body, "{\"code\":1,\"msg\":\"账号或密码错误\"}");
+    }
+}
+
+/* /api/logout ：注销令牌 */
+static void api_logout(Param* ps, int np)
+{
+    auth_logout(get_param(ps, np, "token"));
+    sprintf(s_body, "{\"code\":0,\"msg\":\"已退出\"}");
+}
+
 /* ---------------- 页面 HTML（内嵌，浏览器直接渲染） ---------------- */
 static const char* PAGE_HTML =
 "<!DOCTYPE html><html lang=\"zh\"><head><meta charset=\"utf-8\">"
@@ -275,11 +320,8 @@ static const char* PAGE_HTML =
 "</style></head><body>"
 "<div class=\"top\">📊 学生成绩管理系统 - 数据结构课程设计</div><div class=\"wrap\">"
 
-"<div class=\"card\"><b>角色</b>：<select id=\"role\" onchange=\"roleChange()\">"
-"<option value=\"admin\">管理员</option><option value=\"teacher\">教师</option>"
-"<option value=\"student\">学生</option></select>"
-"<span id=\"stuBox\" style=\"display:none\">学号：<input id=\"stuId\" placeholder=\"输入本人学号\">"
-"<button onclick=\"viewSelf()\">查询我的成绩</button></span></div>"
+"<div class=\"card\" id=\"loginCard\"><b>🔐 登录</b>　账号：<input id=\"l_account\" placeholder=\"学号/教师号/admin\">　密码：<input id=\"l_pwd\" type=\"password\" placeholder=\"密码\">　<button onclick=\"doLogin()\">登录</button>　<span class=\"msg\" id=\"lmsg\"></span></div>"
+"<div class=\"card\" id=\"userCard\" style=\"display:none\"><b>当前用户</b>：<span id=\"uinfo\"></span>　<button class=\"gray\" onclick=\"doLogout()\">退出登录</button></div>"
 
 "<div class=\"card\" id=\"addCard\"><b>➕ 录入成绩</b><br>"
 "<input id=\"a_id\" placeholder=\"学号\"><input id=\"a_name\" placeholder=\"姓名\">"
@@ -293,7 +335,7 @@ static const char* PAGE_HTML =
 "<input id=\"f_course\" placeholder=\"课程\">"
 "<button onclick=\"loadList()\">查询</button>"
 "<button class=\"gray\" onclick=\"clearFilter()\">重置</button>"
-"<button class=\"gray\" onclick=\"saveAll()\">💾 保存到文件</button>"
+"<button class=\"gray\" id=\"saveBtn\" onclick=\"saveAll()\">💾 保存到文件</button>"
 "<div class=\"msg\" id=\"msg\"></div>"
 "<table><thead><tr><th id=\"th_id\" onclick=\"sortList('id')\">学号</th><th id=\"th_name\" onclick=\"sortList('name')\">姓名</th><th id=\"th_className\" onclick=\"sortList('className')\">班级</th><th id=\"th_term\" onclick=\"sortList('term')\">学期</th><th id=\"th_course\" onclick=\"sortList('course')\">课程</th><th id=\"th_score\" onclick=\"sortList('score')\">成绩</th><th>操作</th></tr></thead>"
 "<tbody id=\"tb\"></tbody></table></div>"
@@ -307,17 +349,27 @@ static const char* PAGE_HTML =
 
 "</div><script>"
 "const $=id=>document.getElementById(id);"
-"function roleChange(){const r=$('role').value;"
-"$('addCard').style.display=(r==='student')?'none':'block';"
-"$('stuBox').style.display=(r==='student')?'inline':'none';"
-"if(r==='student')loadList();}"
+"let session=null;"
+"async function doLogin(){"
+"const d=await rawApi('/api/login?account='+encodeURIComponent($('l_account').value)+'&password='+encodeURIComponent($('l_pwd').value));"
+"if(d.code===0){session=d;$('loginCard').style.display='none';$('userCard').style.display='block';"
+"$('uinfo').textContent=d.name+'（'+({0:'管理员',1:'教师',2:'学生'})[d.role]+'）';applyRole();loadList();}"
+"else $('lmsg').textContent=d.msg;}"
+"async function doLogout(){await rawApi('/api/logout?token='+session.token);location.reload();}"
+"function applyRole(){if(!session)return;const r=session.role;"
+"isAdmin=(r<=1);"
+"$('addCard').style.display=(r<=1)?'block':'none';"
+"$('saveBtn').style.display=(r<=1)?'inline-block':'none';"
+"if(r===2)$('f_id').value=session.id;}"
 "function msg(t){$('msg').textContent=t;setTimeout(()=>{$('msg').textContent=''},3000);}"
-"async function api(url){const r=await fetch(url);return r.json();}"
+"async function rawApi(url){const r=await fetch(url);return r.json();}"
+"async function api(url){if(session&&session.token)url+=(url.includes('?')?'&':'?')+'token='+session.token;"
+"const d=await rawApi(url);if(d.code===2){alert('请先登录');throw new Error('unauthorized');}return d;}"
 "function tdScore(s){return '<td class=\"'+(s>=60?'score-hi':'score-lo')+'\">'+s+'</td>';}"
 "let lastData=[],sortKey='',sortDir=1,isAdmin=true;"
 "async function loadList(){"
 "const q=new URLSearchParams({id:$('f_id').value,name:$('f_name').value,className:$('f_class').value,term:$('f_term').value,course:$('f_course').value});"
-"const d=await api('/api/list?'+q);isAdmin=$('role').value!=='student';lastData=d.data;renderList();}"
+"const d=await api('/api/list?'+q);lastData=d.data;renderList();}"
 "function sortList(k){if(sortKey===k)sortDir=-sortDir;else{sortKey=k;sortDir=1;}renderList();}"
 "function renderList(){"
 "const heads={id:'学号',name:'姓名',className:'班级',term:'学期',course:'课程',score:'成绩'};"
@@ -336,15 +388,15 @@ static const char* PAGE_HTML =
 "async function del(id,term,course){if(!confirm('确定删除 '+id+' 的「'+course+'」记录？'))return;"
 "const d=await api('/api/delete?id='+id+'&term='+encodeURIComponent(term)+'&course='+encodeURIComponent(course));msg(d.msg);loadList();}"
 "async function saveAll(){const d=await api('/api/save');msg(d.msg);}"
-"async function viewSelf(){$('f_id').value=$('stuId').value;['f_name','f_class','f_term','f_course'].forEach(i=>$(i).value='');loadList();}"
+""
 "async function loadStats(){"
-"const q=new URLSearchParams({course:$('s_course').value,term:$('s_term').value,id:$('role').value==='student'?$('stuId').value:''});"
+"const q=new URLSearchParams({course:$('s_course').value,term:$('s_term').value,id:(session&&session.role===2)?session.id:''});"
 "const d=await api('/api/stats?'+q);"
 "$('statMsg').innerHTML='<span>人数：<b>'+d.count+'</b></span><span>平均分：<b>'+(d.count?d.avg:'-')+'</b></span>"
 "<span>及格：<b>'+d.pass+'</b></span><span>及格率：<b>'+(d.count?d.passRate+'%':'-')+'</b></span>';"
 "$('stb').innerHTML=d.data.map(r=>'<tr><td class=\"'+(r.rank===1?'rank1':'')+'\">'+(r.rank===1?'🥇 ':r.rank)+'</td><td>'+r.id+'</td><td>'+r.name+'</td><td>'+r.className+'</td><td>'+r.course+'</td>'+tdScore(r.score)"
 "+'<td><div class=\"bar\" style=\"width:'+r.score+'%\"></div></td></tr>').join('')||'<tr><td colspan=7>无数据</td></tr>';}"
-"roleChange();loadList();"
+""
 "</script></body></html>";
 
 /* ---------------- HTTP 应答 ---------------- */
@@ -386,26 +438,62 @@ static void handle(SOCKET client, Node** ppHead, char* pathWithQuery)
 
     if (strcmp(pathWithQuery, "/") == 0 || strcmp(pathWithQuery, "/index.html") == 0) {
         respond(client, "text/html", PAGE_HTML);
-    } else if (strcmp(pathWithQuery, "/api/list") == 0) {
-        api_list(*ppHead, ps, np);
+    } else if (strcmp(pathWithQuery, "/api/login") == 0) {
+        api_login(ps, np);
         respond(client, "application/json", s_body);
-    } else if (strcmp(pathWithQuery, "/api/add") == 0) {
-        api_add(ppHead, ps, np);
-        respond(client, "application/json", s_body);
-    } else if (strcmp(pathWithQuery, "/api/update") == 0) {
-        api_update(ppHead, ps, np);
-        respond(client, "application/json", s_body);
-    } else if (strcmp(pathWithQuery, "/api/delete") == 0) {
-        api_delete(ppHead, ps, np);
-        respond(client, "application/json", s_body);
-    } else if (strcmp(pathWithQuery, "/api/stats") == 0) {
-        api_stats(*ppHead, ps, np);
-        respond(client, "application/json", s_body);
-    } else if (strcmp(pathWithQuery, "/api/save") == 0) {
-        api_save(*ppHead);
+    } else if (strcmp(pathWithQuery, "/api/logout") == 0) {
+        api_logout(ps, np);
         respond(client, "application/json", s_body);
     } else {
-        respond(client, "text/plain", "404 Not Found");
+        /* 以下接口都需要登录，且按角色做服务端权限控制 */
+        Session sess;
+        if (!auth_verify(get_param(ps, np, "token"), &sess)) {
+            sprintf(s_body, "{\"code\":2,\"msg\":\"请先登录\"}");
+            respond(client, "application/json", s_body);
+            return;
+        }
+
+        if (strcmp(pathWithQuery, "/api/list") == 0) {
+            if (sess.role == ROLE_STUDENT)          /* 学生强制只查本人 */
+                force_param(ps, &np, "id", sess.id);
+            api_list(*ppHead, ps, np);
+        } else if (strcmp(pathWithQuery, "/api/add") == 0) {
+            if (sess.role == ROLE_STUDENT) {
+                sprintf(s_body, "{\"code\":1,\"msg\":\"学生无录入权限\"}");
+                respond(client, "application/json", s_body);
+                return;
+            }
+            api_add(ppHead, ps, np);
+        } else if (strcmp(pathWithQuery, "/api/update") == 0) {
+            if (sess.role == ROLE_STUDENT) {
+                sprintf(s_body, "{\"code\":1,\"msg\":\"学生无修改权限\"}");
+                respond(client, "application/json", s_body);
+                return;
+            }
+            api_update(ppHead, ps, np);
+        } else if (strcmp(pathWithQuery, "/api/delete") == 0) {
+            if (sess.role != ROLE_ADMIN) {          /* 只有管理员能删 */
+                sprintf(s_body, "{\"code\":1,\"msg\":\"仅管理员可删除\"}");
+                respond(client, "application/json", s_body);
+                return;
+            }
+            api_delete(ppHead, ps, np);
+        } else if (strcmp(pathWithQuery, "/api/stats") == 0) {
+            if (sess.role == ROLE_STUDENT)
+                force_param(ps, &np, "id", sess.id);
+            api_stats(*ppHead, ps, np);
+        } else if (strcmp(pathWithQuery, "/api/save") == 0) {
+            if (sess.role == ROLE_STUDENT) {
+                sprintf(s_body, "{\"code\":1,\"msg\":\"学生无保存权限\"}");
+                respond(client, "application/json", s_body);
+                return;
+            }
+            api_save(*ppHead);
+        } else {
+            respond(client, "text/plain", "404 Not Found");
+            return;
+        }
+        respond(client, "application/json", s_body);
     }
 }
 
@@ -454,6 +542,10 @@ int webui_start(Node** ppHead, int port)
         SOCKET client = accept(listenSock, NULL, NULL);
         if (client == INVALID_SOCKET)
             continue;
+
+        /* 接收超时 2 秒：浏览器会发预连接（不发数据），不设超时会堵死单线程服务 */
+        DWORD rcvTimeout = 2000;
+        setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, (const char*)&rcvTimeout, sizeof(rcvTimeout));
 
         int len = recv(client, req, sizeof(req) - 1, 0);
         if (len > 0) {
