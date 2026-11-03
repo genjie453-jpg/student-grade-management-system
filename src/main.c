@@ -55,7 +55,15 @@ static void flow_add(void)
         return;
     }
     g_head = list_insert_tail(g_head, s);
-    fileio_append(DATA_FILE, &s);
+    index_build(g_head);        /* 链表变结构，重建索引保持一致（O(n)，规模小可接受） */
+    if (!fileio_append(DATA_FILE, &s)) {
+        /* 落盘失败：把刚插入的节点撤回，保持内存与文件一致 */
+        int deleted = 0;
+        g_head = list_delete_one(g_head, s.id, s.term, s.course, &deleted);
+        index_build(g_head);
+        printf("[失败] 写入文件失败（%s），本次录入已撤销\n", fileio_last_error());
+        return;
+    }
     printf("[成功] 已录入并写入文件\n");
 }
 
@@ -158,8 +166,11 @@ static void flow_update_score(void)
         return;
     }
     if (list_update_score(g_head, id, term, course, score)) {
-        fileio_save(DATA_FILE, g_head);
-        printf("[成功] 已修改并保存\n");
+        if (fileio_save(DATA_FILE, g_head) >= 0)
+            printf("[成功] 已修改并保存\n");
+        else
+            printf("[警告] 内存中已修改，但写文件失败（%s）；原文件未被破坏，"
+                   "请稍后用菜单“保存文件”重试\n", fileio_last_error());
     } else {
         printf("[失败] 未找到匹配记录\n");
     }
@@ -173,8 +184,11 @@ static void flow_update_info(void)
     printf("新班级(留空不变): "); read_line(cls, sizeof(cls));
 
     if (list_update_info(g_head, id, name, cls)) {
-        fileio_save(DATA_FILE, g_head);
-        printf("[成功] 该学号的所有记录已统一更新并保存\n");
+        if (fileio_save(DATA_FILE, g_head) >= 0)
+            printf("[成功] 该学号的所有记录已统一更新并保存\n");
+        else
+            printf("[警告] 内存中已修改，但写文件失败（%s）；原文件未被破坏，"
+                   "请稍后用菜单“保存文件”重试\n", fileio_last_error());
     } else {
         printf("[失败] 学号不存在\n");
     }
@@ -193,11 +207,18 @@ static void flow_delete(void)
     for (;;) {
         g_head = list_delete_one(g_head, id, term, course, &deleted);
         if (!deleted) break;
+        /* 每删一条就重建索引：否则下一次删除会用索引里已释放的节点指针，
+         * 在链表上找不到该节点时会走到 NULL 导致崩溃 */
+        index_build(g_head);
     }
     int removed = before - list_count(g_head);
     if (removed > 0) {
-        fileio_save(DATA_FILE, g_head);
-        printf("[成功] 删除 %d 条并保存\n", removed);
+        index_build(g_head);    /* 节点已释放，必须重建索引防悬空指针 */
+        if (fileio_save(DATA_FILE, g_head) >= 0)
+            printf("[成功] 删除 %d 条并保存\n", removed);
+        else
+            printf("[警告] 内存中已删除 %d 条，但写文件失败（%s）；原文件未被破坏，"
+                   "请稍后用菜单“保存文件”重试\n", removed, fileio_last_error());
     } else {
         printf("[失败] 未找到匹配记录\n");
     }
@@ -206,8 +227,10 @@ static void flow_delete(void)
 static void flow_save(void)
 {
     int n = fileio_save(DATA_FILE, g_head);
-    printf(n >= 0 ? "[成功] 已保存 %d 条到 %s\n" : "[失败] 无法写入文件\n",
-           n, DATA_FILE);
+    if (n >= 0)
+        printf("[成功] 已保存 %d 条到 %s（上一版备份在 %s.bak）\n", n, DATA_FILE, DATA_FILE);
+    else
+        printf("[失败] 无法写入文件：%s（原文件未被破坏）\n", fileio_last_error());
 }
 
 /* ---------------- 角色菜单 ---------------- */
@@ -337,7 +360,7 @@ int main(int argc, char* argv[])
     g_head = fileio_load(DATA_FILE, &loaded);
     printf("已从 %s 加载 %d 条成绩记录\n", DATA_FILE, loaded);
     printf("已从 %s 加载 %d 个账号\n", USER_FILE, auth_load(USER_FILE));
-    index_build(g_head);            /* 建立学号哈希索引 */
+    index_build(g_head);            /* 建立学号哈希索引；此后增/删记录均会重建（见 flow_add/flow_delete） */
 
     /* 带参数 "web" 直接进页面模式（双击运行则询问） */
     if (argc > 1 && strcmp(argv[1], "web") == 0) {

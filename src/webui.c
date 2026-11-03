@@ -11,6 +11,7 @@
 #include "student.h"
 #include "list.h"
 #include "fileio.h"
+#include "index.h"
 #include "auth.h"
 #include "webui.h"
 
@@ -147,7 +148,16 @@ static void api_add(Node** ppHead, Param* ps, int np)
         return;
     }
     *ppHead = list_insert_tail(*ppHead, s);
-    fileio_append(DATA_FILE, &s);
+    index_build(*ppHead);       /* 写后重建索引（单线程服务，无并发问题） */
+    if (!fileio_append(DATA_FILE, &s)) {
+        /* 落盘失败：撤销内存中的插入，避免页面显示"成功"而文件没数据 */
+        int deleted = 0;
+        *ppHead = list_delete_one(*ppHead, s.id, s.term, s.course, &deleted);
+        index_build(*ppHead);
+        fprintf(stderr, "[错误] 录入写文件失败：%s\n", fileio_last_error());
+        sprintf(s_body, "{\"code\":1,\"msg\":\"写入文件失败，本次录入已撤销\"}");
+        return;
+    }
     sprintf(s_body, "{\"code\":0,\"msg\":\"录入成功\"}");
 }
 
@@ -164,8 +174,12 @@ static void api_update(Node** ppHead, Param* ps, int np)
         return;
     }
     if (list_update_score(*ppHead, id, term, course, score)) {
-        fileio_save(DATA_FILE, *ppHead);
-        sprintf(s_body, "{\"code\":0,\"msg\":\"修改成功\"}");
+        if (fileio_save(DATA_FILE, *ppHead) >= 0) {
+            sprintf(s_body, "{\"code\":0,\"msg\":\"修改成功\"}");
+        } else {
+            fprintf(stderr, "[错误] 修改后保存失败：%s\n", fileio_last_error());
+            sprintf(s_body, "{\"code\":1,\"msg\":\"已修改但写入文件失败，原文件未被破坏，请点“保存到文件”重试\"}");
+        }
     } else {
         sprintf(s_body, "{\"code\":1,\"msg\":\"未找到匹配的记录\"}");
     }
@@ -179,8 +193,13 @@ static void api_delete(Node** ppHead, Param* ps, int np)
                               get_param(ps, np, "term"),
                               get_param(ps, np, "course"), &deleted);
     if (deleted) {
-        fileio_save(DATA_FILE, *ppHead);
-        sprintf(s_body, "{\"code\":0,\"msg\":\"删除成功\"}");
+        index_build(*ppHead);   /* 节点已释放，重建索引防悬空指针 */
+        if (fileio_save(DATA_FILE, *ppHead) >= 0) {
+            sprintf(s_body, "{\"code\":0,\"msg\":\"删除成功\"}");
+        } else {
+            fprintf(stderr, "[错误] 删除后保存失败：%s\n", fileio_last_error());
+            sprintf(s_body, "{\"code\":1,\"msg\":\"已在内存删除，但写入文件失败，原文件未被破坏，请点“保存到文件”重试\"}");
+        }
     } else {
         sprintf(s_body, "{\"code\":1,\"msg\":\"未找到匹配的记录\"}");
     }
@@ -248,8 +267,13 @@ static void api_stats(Node* head, Param* ps, int np)
 static void api_save(Node* head)
 {
     int n = fileio_save(DATA_FILE, head);
-    sprintf(s_body, "{\"code\":%d,\"msg\":\"已保存 %d 条到 %s\"}",
-            n >= 0 ? 0 : 1, n, DATA_FILE);
+    if (n >= 0) {
+        sprintf(s_body, "{\"code\":0,\"msg\":\"已保存 %d 条到 %s（上一版备份在 .bak）\"}",
+                n, DATA_FILE);
+    } else {
+        fprintf(stderr, "[错误] 保存失败：%s\n", fileio_last_error());
+        sprintf(s_body, "{\"code\":1,\"msg\":\"保存失败，原文件未被破坏\"}");
+    }
 }
 
 /* 强制覆盖/新增一个查询参数（用于学生强制只能查本人） */

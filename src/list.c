@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include "list.h"
+#include "index.h"
 
 /* ---------------- 插入 ---------------- */
 
@@ -39,9 +40,21 @@ Node* list_insert_tail(Node* head, Student s)
 
 /* ---------------- 查找 ---------------- */
 
+/* 哈希索引快路径：返回该学号在链表中的起始扫描节点。
+ * 同一学号的多条记录沿 next 分布，从起点向后扫即可。
+ * 前提约定：增/删记录后调用方必须立即 index_build 重建索引（见 main.c/webui.c），
+ * 因此索引里不会残留已释放的节点；未命中只是学号不存在，回退整表遍历兜底。 */
+static Node* find_start(Node* head, const char* id)
+{
+    Node* p = index_lookup(id);
+    return (p != NULL) ? p : head;
+}
+
 Node* list_find_by_id(Node* head, const char* id)
 {
-    for (Node* p = head; p != NULL; p = p->next)
+    if (head == NULL || id == NULL || id[0] == '\0')
+        return NULL;
+    for (Node* p = find_start(head, id); p != NULL; p = p->next)
         if (strcmp(p->data.id, id) == 0)
             return p;
     return NULL;
@@ -49,7 +62,9 @@ Node* list_find_by_id(Node* head, const char* id)
 
 Node* list_find_record(Node* head, const char* id, const char* term, const char* course)
 {
-    for (Node* p = head; p != NULL; p = p->next)
+    if (head == NULL || id == NULL || id[0] == '\0')
+        return NULL;
+    for (Node* p = find_start(head, id); p != NULL; p = p->next)
         if (strcmp(p->data.id, id) == 0
             && strcmp(p->data.term, term) == 0
             && strcmp(p->data.course, course) == 0)
@@ -66,8 +81,22 @@ int list_exists(Node* head, const char* id, const char* term, const char* course
 
 Node* list_delete_one(Node* head, const char* id, const char* term, const char* course, int* deleted)
 {
-    Node *prev = NULL, *cur = head;
     *deleted = 0;
+    if (head == NULL || id == NULL || id[0] == '\0')
+        return head;
+
+    /* 利用索引直接定位到该学号的首条记录，跳过前面的无关节点；
+     * 依赖「写后重建」约定，索引指针必然在链表上；
+     * 注意起点不能是头节点，否则没有 prev 可改接，仍从表头找 */
+    Node *prev = NULL, *cur = head;
+    Node* first = index_lookup(id);
+    if (first != NULL && first != head) {
+        prev = head;                      /* first 必在头节点之后，至少走一步 */
+        while (prev->next != first) {
+            prev = prev->next;
+            cur = prev->next;
+        }
+    }
 
     while (cur != NULL) {
         if (strcmp(cur->data.id, id) == 0
